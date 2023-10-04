@@ -7,9 +7,11 @@ A module for running your kfp components locally and making them easy to test. C
 * Every `TestStep` or `ContainerTestStep` takes a base_path which can be a pytest `temp_path` for easy and clean testing
 
 ## Some things to keep in mind
-In order to test a component in its base_image container:
-1. You need to have the image already built on your machine
-2. kfptest must have kfp installed in the container when testing the component. By default, kfptest will attempt to `pip install kfp` before running the component which takes about 15 seconds if it's not already installed. This also means that pip must be available for use in the base_image. 
+* In order to test a component in its base_image container:
+  1. You need to have the image already built on your machine
+  2. kfptest must have kfp installed in the container when testing the component. By default, kfptest will attempt to `pip install kfp` before running the component which takes about 15 seconds if it's not already installed. This also means that pip must be available for use in the base_image.
+* Currently works with kfp 2.3.0
+
 
 ## Usage
 ### Run a component using your local environment
