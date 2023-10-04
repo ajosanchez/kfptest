@@ -42,10 +42,10 @@ from my_components import my_component
 # Note: to chain components, you must use the same base_path for each component
 
 input_data = [5,4,3,2,1]
-step_1 = ContainerTestStep(sample, {"name": "value", "input_dataset": input_data}, base_path="mydir")
+step_1 = ContainerTestStep(my_component, {"name": "value", "input_dataset": input_data}, base_path="mydir")
 step_1_run = step_1.run()
 
-step_2 = ContainerTestStep(sample, {"name": "Alex", "input_dataset": step_1_run.outputs["output_dataset"]}, base_path="mydir")
+step_2 = ContainerTestStep(my_component, {"name": "Alex", "input_dataset": step_1_run.outputs["output_dataset"]}, base_path="mydir")
 step_2_run = step_2.run()
 print(step_2_run.obj)
 ```
