@@ -209,7 +209,7 @@ class TestStep():
         
         Parameters:
         kfp_component -- kfp component to run
-        omponent_args -- parameter values to pass to the component at runtime
+        component_args -- parameter values to pass to the component at runtime
         base_path -- directory in which to store the component output folder as well as the io_dir (e.g., a test's tmpdir)
         """
         self.component = kfp_component
