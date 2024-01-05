@@ -51,3 +51,6 @@ step_2 = ContainerTestStep(my_component, {"name": "Alex", "input_dataset": step_
 step_2_run = step_2.run()
 print(step_2_run.obj)
 ```
+
+## Diagram
+![diagram](diagram.png)
