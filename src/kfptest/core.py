@@ -59,7 +59,7 @@ from kfp.dsl import *
 
 TestStepOutput = namedtuple('TestStepOutput', ['output', 'outputs', 'obj'])
 
-def prep_container_run(io_dir: str, component_filename: str, component_name: str):
+def prep_container_run(io_dir: str|Path, component_filename: str, component_name: str):
     """Prep and kickoff TestStep.run() from within a container
     
     Parameters:
@@ -94,6 +94,7 @@ def is_kfp_artifact(obj):
 
 
 class ContainerTestStep():
+    """Todo: place class docstring here"""
 
     def __init__(self, kfp_component, component_args: dict, base_path: Optional[Path|str]=None):
         """Init a ContainerTestStep which can run a kfp component within a docker container
