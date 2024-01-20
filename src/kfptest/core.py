@@ -1,48 +1,3 @@
-"""
-Example Usage
--------------
-
-# Run a single component locally:
-
-from kfptest import TestStep, ContainerTestStep
-from sample_component import sample
-
-input_data = [5,4,3,2,1]
-step = TestStep(sample, {"name": "Alex", "input_dataset": input_data})
-step_run = step.run()
-print(step_run.obj)
-
-# Run a single component inside a conatiner of its image:
-
-step = ContainerTestStep(sample, {"name": "Alex", "input_dataset": input_data})
-step_run = step.run()
-print(step_run.obj)
-
-# Run two componets inside their container images using first's output as the seconds's input
-# The same base_dir must be used for both components to accomplish this
-
-step_1 = ContainerTestStep(sample, {"name": "Alex", "input_dataset": input_data}, base_path="mydir")
-step_1_run = step_1.run()
-
-step_2 = ContainerTestStep(sample, {"name": "Alex", "input_dataset": step_1_run.outputs["output_dataset"]}, base_path="mydir")
-step_2_run = step_2.run()
-print(step_2_run.obj)
-
-# Use kfptest with pytest:
-
-def test_output(tmp_path):
-    input_data = [5,4,3,2,1]
-
-    step_1_args = {"name": "Alex", "input_dataset": input_data}
-    step_1 = ContainerTestStep(kfp_component=sample, component_args=step_1_args, base_path=tmp_path)
-    step_1_run = step_1.run()
-
-    step_2_args = {"name": "Alex", "input_dataset": step_1_run.outputs["output_dataset"]}
-    step_2 = ContainerTestStep(sample, step_2_args, base_path=tmp_path)
-    step_2_run = step_2.run()
-
-    assert step_2_run.obj["output_dataset"] == [20, 16, 12, 8, 4]
-"""
 from pathlib import Path
 import tempfile
 from typing import Optional
@@ -52,14 +7,17 @@ from copy import copy, deepcopy
 import inspect
 import shutil
 import importlib
+import logging
+import sys
 
 import kfp
 from kfp.dsl import *
 
 
+logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 TestStepOutput = namedtuple('TestStepOutput', ['output', 'outputs', 'obj'])
 
-def prep_container_run(io_dir: str|Path, component_filename: str, component_name: str):
+def prep_container_run(io_dir: str|Path, component_path: str, component_name: str):
     """Prep and kickoff TestStep.run() from within a container
     
     Parameters:
@@ -69,10 +27,9 @@ def prep_container_run(io_dir: str|Path, component_filename: str, component_name
     """
     io_dir = Path(io_dir)
 
-    # load the component in container
-    # the component cannot be pickled so it must be loaded "from scratch" in the container
-    module_name = Path(component_filename).stem
-    module = importlib.import_module(module_name)
+    # Load component: it cannot be pickled so it must be loaded via import in the container
+    module_name = f".{Path(component_path).stem}"
+    module = importlib.import_module(name=module_name, package="code")
     component = getattr(module, component_name)
 
     # load run arguments from filesystem, add component 
@@ -108,39 +65,64 @@ class ContainerTestStep():
 
         client = docker.from_env()
         self.component = kfp_component
+        self.component_args = component_args
 
+        # Set local base_path where args, code, outputs should be written
         if base_path is not None:
             self.base_path = Path(base_path).absolute()
         else:
             self.base_path = Path(tempfile.mkdtemp()).absolute()
 
-        #self.base_path = Path(base_path or tempfile.mkdtemp())
-        self.io_dir = Path(tempfile.mkdtemp(dir=str(self.base_path)))
-        self.code_dir = Path(tempfile.mkdtemp(dir=str(self.base_path)))
+        # Create local folders for arguments and code
+        self.local_io_dir = Path(tempfile.mkdtemp(dir=str(self.base_path)))
+        self.local_code_dir = Path(tempfile.mkdtemp(dir=str(self.base_path)))
+        
+        # get container's working_dir to know where to mount volumes from
         self.image = kfp_component.component_spec.implementation.container.image
         self.container_working_dir = client.images.get(self.image).attrs.get("Config").get("WorkingDir")
-        self.component_args = component_args
+        
+        # Find filename of file containing the component function
+        self.component_path = Path(inspect.getabsfile(self.component.python_func)) # path to .py file containing component
     
-    def _add_assets_to_io_dir(self):
-        # write all the parameters passed to the component to local filesystem
-        with open(self.io_dir / "run_args", "wb") as f:
+
+    def _write_container_requirements(self):
+        """
+        Write component_args to binary so it can be loaded at container exec and copy the kfptest package as well
+        as the component function's .py file.
+        """
+        # Write arguments to pickle: write arguments for containertized-component-run to local filesystem
+        with open(self.local_io_dir / "run_args", "wb") as f:
             run_args = {"component_args": self.containerized_component_args, "base_path": "component_output"}
             pickle.dump(run_args, f)
+            logging.info("component args written to %s", str(self.local_io_dir / "run_args"))
         
-        # copy this file to code_dir
-        file_path = Path(inspect.getabsfile(TestStep))
-        shutil.copyfile(file_path, self.code_dir / file_path.name)
-        # copy component file to code_dir
-        self.component_path = Path(inspect.getabsfile(self.component.python_func)) # path to .py file containing component
-        shutil.copyfile(self.component_path, self.code_dir / self.component_path.name)
+        # Copy kfptest package
+        kfp_dir = Path(inspect.getabsfile(TestStep)).parents[2]
+        logging.info("kfptest package code found at %s", kfp_dir)
+        shutil.copytree(str(kfp_dir), f"{self.local_code_dir}/kfptest", dirs_exist_ok=True)
+        logging.info("kfptest package code copied to %s/kfptest", self.local_code_dir)
+        
+        # Copy .py file containging component function
+        logging.info("component code file found at %s", self.component_path)
+        shutil.copyfile(self.component_path, self.local_code_dir / self.component_path.name)
+        logging.info("component code file copied to %s", str(self.local_code_dir / self.component_path.name))
 
+        # Create an __init__.py file:
+        with open(self.local_code_dir / "__init__.py", "w") as f:
+            pass
+        
     def _process_outputs(self):
+        # Remove s3:// or gs:// prefixes from artifacts for local filesystem testing
         kfp.dsl.types.artifact_types._GCS_LOCAL_MOUNT_PREFIX = ""
-        # load container outputs
-        with open(self.io_dir / "component_run", "rb") as f:
+        kfp.dsl.types.artifact_types._S3_LOCAL_MOUNT_PREFIX = ""
+        kfp.dsl.types.artifact_types._MINIO_LOCAL_MOUNT_PREFIX = ""
+        
+        # Load container outputs into Python obj
+        logging.info("Loading container output: %s", str(self.local_io_dir / "component_run"))
+        with open(self.local_io_dir / "component_run", "rb") as f:
             component_run = pickle.load(f)
 
-        # fix artifact paths from container paths to local filesystem paths
+        # Fix artifact paths from container paths to local filesystem paths
         outputs = copy(component_run.outputs)
         for k, v in outputs.items():
             if is_kfp_artifact(v):
@@ -151,7 +133,7 @@ class ContainerTestStep():
 
     def run(self):
         """Run the component inside its docker conatiner:
-          1. create docker volume bindings
+          1. create docker volume bindings for io, output and code
           2. translate local input artifact paths into container paths
           3. populate io_dir with component args and the code_dir with code files
           4. run the component inside its container
@@ -164,9 +146,8 @@ class ContainerTestStep():
         volumes = {}
 
         # create io dir mapping
-        local_io_dir = str(self.io_dir)
         container_io_dir = f"{self.container_working_dir}/component_io"
-        io_dir_mapping = {local_io_dir: {"bind": container_io_dir}}
+        io_dir_mapping = {self.local_io_dir: {"bind": container_io_dir}}
         volumes.update(io_dir_mapping)
 
         # create output dir mapping
@@ -176,14 +157,18 @@ class ContainerTestStep():
         volumes.update(outputs_dir_mapping)
 
         # create code dir mapping
-        local_code_dir = str(self.code_dir)
-        container_code_dir = self.container_working_dir
-        code_dir_mapping = {local_code_dir: {"bind": container_code_dir}}
+        container_code_dir = f"{self.container_working_dir}/code"
+        #container_code_dir = f"{self.container_working_dir}/mnt"
+        code_dir_mapping = {self.local_code_dir: {"bind": container_code_dir}}
         volumes.update(code_dir_mapping)
 
-        # convert artifact paths from local to conatiner
+        # convert artifact paths from local to container
         self.containerized_component_args = deepcopy(self.component_args)
+
         kfp.dsl.types.artifact_types._GCS_LOCAL_MOUNT_PREFIX = ""
+        kfp.dsl.types.artifact_types._S3_LOCAL_MOUNT_PREFIX = ""
+        kfp.dsl.types.artifact_types._MINIO_LOCAL_MOUNT_PREFIX = ""
+
         for name, input_ in self.component_args.items():
             if is_kfp_artifact(input_):
                 # change everything up to the last folder to be the container_outputs_dir
@@ -192,11 +177,16 @@ class ContainerTestStep():
                 self.containerized_component_args[name].uri = f"gs://{container_path}"
 
         # write component_args and copy code to proper folders
-        self._add_assets_to_io_dir()
+        self._write_container_requirements()
 
         # run component in container
-        command = ['/bin/bash', '-c', f'pip install kfp && python -c \'from kfptest import prep_container_run;prep_container_run(io_dir="{container_io_dir}", component_filename="{self.component_path.name}", component_name="{self.component.name}")\'']
-        #command = f'python -c \'from kfptest_class import prep_container_run;prep_container_run(io_dir="{container_io_dir}", component_filename="{self.component_path.name}", component_name="{self.component.name}")\''
+        component_path = f"{container_code_dir}/{self.component_path.name}"
+        component_name = self.component.python_func.__name__ #kfp will replace "_" with "-" so component.name won't work all the time
+        pip_command = f"install kfp==2.3.0 {container_code_dir}/kfptest"
+        python_command = f'\'from kfptest import prep_container_run;prep_container_run(io_dir="{container_io_dir}", component_path="{component_path}", component_name="{component_name}")\''
+        command = ['/bin/bash', '-c', f"pip {pip_command} && python -c {python_command}"]
+        logging.info("Running component in container with command: %s", command)
+        logging.info("Conatiner volume mappings: %s", str(volumes))
         client.containers.run(self.image, command, volumes=volumes)
 
         # conver artifact paths from container to local
